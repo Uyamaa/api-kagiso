@@ -3,6 +3,19 @@ from typing import List
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+# Standard tool for reading environment variables
+import os
+# Reads the .env file and loads its lines into environment variables
+from dotenv import load_dotenv
+
+# Load the .env file (does nothing if it's missing, e.g. on a server that sets variables itself)
+load_dotenv()
+
+# Read the three settings; os.getenv gives None if a variable isn't set
+LLM_API_KEY = os.getenv("LLM_API_KEY")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL")
+LLM_MODEL = os.getenv("LLM_MODEL")
+  
 # Create the application object
 app = FastAPI(title="Drive Alert Service")
 
@@ -30,7 +43,8 @@ class AlertResponse(BaseModel):
 # Keep the health route so the pipeline can check the service is alive
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    # Say whether a key is set, but never return the key itself
+    return {"status": "ok", "llm_configured": bool(LLM_API_KEY)}
 
 
 # Register a POST route, and promise FastAPI the reply matches AlertResponse
