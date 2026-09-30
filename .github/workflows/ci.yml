@@ -1,0 +1,34 @@
+# Name shown in the Actions tab on GitHub
+name: CI
+
+# Run on every push and on every pull request
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Job 1: install the packages and run the tests
+  test:
+    # GitHub lends us a fresh Linux machine for each run
+    runs-on: ubuntu-latest
+    steps:
+      # Download the repo's code onto that machine
+      - uses: actions/checkout@v4
+      # Install Python 3.11, the same version our Dockerfile uses
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # Install the app and test packages
+      - run: pip install -r requirements-dev.txt
+      # Run the tests; a failure here stops the pipeline
+      - run: pytest
+
+  # Job 2: build the Docker image, but only if the tests passed
+  build:
+    # needs: test is what enforces "nothing builds unless tests pass"
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Build the image (not pushed anywhere yet)
+      - run: docker build -t api-kagiso .
