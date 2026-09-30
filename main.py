@@ -1,5 +1,5 @@
-# List is used to say "a list of strings"; BaseModel and Field describe our data
-from typing import List
+# Types for "a list of strings" and "a value that may be None"
+from typing import List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
@@ -7,6 +7,8 @@ from pydantic import BaseModel, Field
 import os
 # Reads the .env file and loads its lines into environment variables
 from dotenv import load_dotenv
+# The library that sends requests to an AI service
+from openai import OpenAI
 
 # Load the .env file (does nothing if it's missing, e.g. on a server that sets variables itself)
 load_dotenv()
@@ -15,7 +17,10 @@ load_dotenv()
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 LLM_BASE_URL = os.getenv("LLM_BASE_URL")
 LLM_MODEL = os.getenv("LLM_MODEL")
-  
+
+# Create the AI client only if a key exists; base_url points it at Groq, timeout stops it hanging
+client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL, timeout=10) if LLM_API_KEY else None
+
 # Create the application object
 app = FastAPI(title="Drive Alert Service")
 
@@ -38,6 +43,68 @@ class AlertResponse(BaseModel):
     alert_required: bool
     severity: str
     message: str
+    # Where the message came from: "llm", "template" or "none"
+    source: str
+
+
+# Recommended action for each risk level
+ACTIONS = {
+    "High": "Back up its data and schedule replacement as soon as possible.",
+    "Medium": "Schedule an inspection and keep monitoring this drive.",
+}
+
+# Instructions that tell the AI how to behave
+SYSTEM_PROMPT = (
+    "You write short maintenance alerts for data center technicians. "
+    "Use ONLY the facts provided. Do not invent numbers, causes, dates or drive details. "
+    "Write 2 or 3 plain sentences: what is wrong, then the recommended action."
+)
+
+
+# Build the fixed-template alert text; this is the fallback if the AI fails
+def template_message(req: AlertRequest) -> str:
+    # Turn the anomalies list into one readable phrase, with a default if it is empty
+    issues = ", ".join(req.anomalies) if req.anomalies else "abnormal SMART readings"
+    # Return the finished alert sentence
+    return (
+        f"{req.risk_level} risk: drive {req.drive_id} has a "
+        f"{req.failure_probability:.0%} failure probability. Detected: {issues}."
+    )
+
+
+# Ask the AI to write the alert; returns None if anything goes wrong
+def llm_message(req: AlertRequest) -> Optional[str]:
+    # No client means no key was set, so skip the AI
+    if client is None:
+        return None
+    # Wrap the call so any failure returns None instead of crashing the route
+    try:
+        # Build the facts the AI is allowed to use
+        facts = (
+            f"Drive ID: {req.drive_id}\n"
+            f"Risk level: {req.risk_level}\n"
+            f"Failure probability: {req.failure_probability:.0%}\n"
+            f"Anomalies: {', '.join(req.anomalies) if req.anomalies else 'none listed'}\n"
+            f"Recommended action: {ACTIONS[req.risk_level]}"
+        )
+        # Send the request to the AI service
+        response = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": facts},
+            ],
+            max_tokens=600,
+            temperature=0.2,
+        )
+        # Pull the text out of the reply and trim whitespace
+        text = (response.choices[0].message.content or "").strip()
+        # Return the text, or None if it came back empty
+        return text or None
+    except Exception as exc:
+        # Print the reason in the terminal so we can debug, then fall back
+        print(f"LLM call failed, using template: {exc}")
+        return None
 
 
 # Keep the health route so the pipeline can check the service is alive
@@ -57,16 +124,17 @@ def generate_alert(req: AlertRequest):
             alert_required=False,
             severity=req.risk_level.lower(),
             message="",
+            source="none",
         )
 
-    # Turn the list of anomalies into one readable phrase, with a default if empty
-    issues = ", ".join(req.anomalies) if req.anomalies else "abnormal SMART readings"
-
-    # Build the alert text from a fixed template
-    message = (
-        f"{req.risk_level} risk: drive {req.drive_id} has a "
-        f"{req.failure_probability:.0%} failure probability. Detected: {issues}."
-    )
+    # Try the AI first; it returns None if anything goes wrong
+    message = llm_message(req)
+    # Remember where the text came from
+    source = "llm"
+    # If the AI gave nothing, fall back to the template
+    if message is None:
+        message = template_message(req)
+        source = "template"
 
     # Send back the finished alert
     return AlertResponse(
@@ -74,4 +142,5 @@ def generate_alert(req: AlertRequest):
         alert_required=True,
         severity=req.risk_level.lower(),
         message=message,
+        source=source,
     )
